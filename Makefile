@@ -1,7 +1,7 @@
-all: server replayer
+all: recorder replayer
 
-server:
-	go build -o ./bin/tidb-server ./cmd/server 
+recorder:
+	go build -o ./bin/tidb-recorder ./cmd/recorder 
 
 replayer:
 	go build -o ./bin/tidb-replayer ./cmd/replayer

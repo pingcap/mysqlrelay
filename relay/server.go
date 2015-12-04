@@ -86,6 +86,7 @@ func NewServer(driver IDriver, addr string, path string) (*Server, error) {
 	var err error
 
 	if len(path) > 0 {
+		os.Remove(path)
 		s.rec, err = os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0644)
 	} else {
 		// if empty, we will use DevNull file.
