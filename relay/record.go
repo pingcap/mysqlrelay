@@ -14,6 +14,7 @@
 package relay
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -53,8 +54,10 @@ type Record struct {
 	Data         []byte
 }
 
+var recSuffix = []byte("tidb")
+
 func (rec *Record) Encode(w io.Writer) error {
-	recLen := len(rec.Data) + 5
+	recLen := len(rec.Data) + 5 + len(recSuffix)
 	buf := make([]byte, recLen+8)
 	n := 0
 	binary.BigEndian.PutUint32(buf[n:n+4], uint32(recLen))
@@ -67,6 +70,8 @@ func (rec *Record) Encode(w io.Writer) error {
 	binary.BigEndian.PutUint32(buf[n:n+4], rec.ConnectionID)
 	n += 4
 	copy(buf[n:], rec.Data)
+	n += len(rec.Data)
+	copy(buf[n:], recSuffix)
 
 	_, err := w.Write(buf)
 	return errors.Trace(err)
@@ -84,7 +89,7 @@ func (rec *Record) Decode(r io.Reader) error {
 
 	recLen := binary.BigEndian.Uint32(recLenBuf[0:4])
 	if l := binary.BigEndian.Uint32(recLenBuf[4:8]); l != ^recLen {
-		return errors.Errorf("invalid buffer to decode %q", recLenBuf)
+		return errors.Errorf("invalid buffer to decode %d != %d", l, ^recLen)
 	}
 
 	buf := make([]byte, recLen)
@@ -92,6 +97,14 @@ func (rec *Record) Decode(r io.Reader) error {
 	if err != nil {
 		return errors.Trace(err)
 	}
+
+	suffixLen := uint32(len(recSuffix))
+	suffix := buf[recLen-suffixLen:]
+	if !bytes.Equal(suffix, recSuffix) {
+		return errors.Errorf("invalid encoded record suffix %q, not %q", suffix, recSuffix)
+	}
+
+	buf = buf[:recLen-suffixLen]
 
 	n := 0
 	rec.Type = RecordType(buf[n])
