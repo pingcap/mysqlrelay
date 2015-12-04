@@ -15,11 +15,12 @@ package relay
 
 import (
 	"database/sql"
+	"os"
+	"sync"
 	"testing"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
-	"github.com/juju/errors"
 	"github.com/ngaut/log"
 	. "github.com/pingcap/check"
 	"github.com/pingcap/tidb"
@@ -65,6 +66,8 @@ func (s *testRelaySuite) SetUpSuite(c *C) {
 }
 
 func (s *testRelaySuite) TearDownSuite(c *C) {
+	os.Remove(s.path)
+
 	if s.server != nil {
 		s.server.Close()
 	}
@@ -120,6 +123,23 @@ func (s *testRelaySuite) TestRelay(c *C) {
 	s.discardRows(c, r)
 	stmt.Close()
 
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			s.mustExec(c, "insert into t values (?, ?)", i*10, i*10)
+		}(i)
+	}
+
+	wg.Wait()
+
+	s.mustExec(c, "insert into t values (4, 4)")
+
+	s.server.Close()
+	s.server = nil
+	time.Sleep(1 * time.Second)
+
 	store, err := tidb.NewStore("memory://test_replay/test_replay")
 	c.Assert(err, IsNil)
 	defer store.Close()
@@ -127,8 +147,8 @@ func (s *testRelaySuite) TestRelay(c *C) {
 	replayer, err := NewReplayer(NewTiDBDriver(store), s.path, false)
 	c.Assert(err, IsNil)
 	replayer.OnRecordRead = func(rec *Record) {
-		log.Errorf("record %s", rec)
+		//log.Errorf("record %s", rec)
 	}
 	err = replayer.Run()
-	c.Assert(err, IsNil, Commentf("%s", errors.ErrorStack(err)))
+	c.Assert(err, IsNil)
 }

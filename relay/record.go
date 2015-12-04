@@ -54,13 +54,17 @@ type Record struct {
 }
 
 func (rec *Record) Encode(w io.Writer) error {
-	buf := make([]byte, len(rec.Data)+9)
+	recLen := len(rec.Data) + 5
+	buf := make([]byte, recLen+8)
 	n := 0
+	binary.BigEndian.PutUint32(buf[n:n+4], uint32(recLen))
+	n += 4
+	// save xor rec len to guarantee length validation.
+	binary.BigEndian.PutUint32(buf[n:n+4], ^uint32(recLen))
+	n += 4
 	buf[n] = byte(rec.Type)
 	n++
 	binary.BigEndian.PutUint32(buf[n:n+4], rec.ConnectionID)
-	n += 4
-	binary.BigEndian.PutUint32(buf[n:n+4], uint32(len(rec.Data)))
 	n += 4
 	copy(buf[n:], rec.Data)
 
@@ -69,20 +73,33 @@ func (rec *Record) Encode(w io.Writer) error {
 }
 
 func (rec *Record) Decode(r io.Reader) error {
-	buf := make([]byte, 9)
-	_, err := io.ReadFull(r, buf)
+	var recLenBuf [8]byte
+	nn, err := io.ReadFull(r, recLenBuf[0:8])
+	if err != nil {
+		return errors.Trace(err)
+	} else if nn == 0 {
+		// no more data to read
+		return errors.Trace(io.EOF)
+	}
+
+	recLen := binary.BigEndian.Uint32(recLenBuf[0:4])
+	if l := binary.BigEndian.Uint32(recLenBuf[4:8]); l != ^recLen {
+		return errors.Errorf("invalid buffer to decode %q", recLenBuf)
+	}
+
+	buf := make([]byte, recLen)
+	_, err = io.ReadFull(r, buf)
 	if err != nil {
 		return errors.Trace(err)
 	}
+
 	n := 0
 	rec.Type = RecordType(buf[n])
 	n++
 	rec.ConnectionID = binary.BigEndian.Uint32(buf[n : n+4])
 	n += 4
-	payloadSize := binary.BigEndian.Uint32(buf[n : n+4])
+	rec.Data = buf[n:]
 
-	rec.Data = make([]byte, payloadSize)
-	_, err = io.ReadFull(r, rec.Data)
 	return errors.Trace(err)
 }
 
@@ -90,17 +107,32 @@ func (rec *Record) String() string {
 	return fmt.Sprintf("conn: %d, type: %s, data: %q", rec.ConnectionID, rec.Type, rec.Data)
 }
 
-func WriteRecord(w io.Writer, tp RecordType, id uint32, data []byte) error {
+type recordWriter interface {
+	Write(tp RecordType, id uint32, data []byte) error
+}
+
+type defaultRecordWriter struct {
+	w io.Writer
+}
+
+func (w *defaultRecordWriter) Write(tp RecordType, id uint32, data []byte) error {
 	rec := &Record{
 		Type:         tp,
 		ConnectionID: id,
 		Data:         data,
 	}
-	return errors.Trace(rec.Encode(w))
+
+	err := rec.Encode(w.w)
+	if err != nil {
+		return errors.Trace(err)
+	}
+
+	return nil
 }
 
-func ReadRecord(r io.Reader) (*Record, error) {
-	rec := new(Record)
-	err := rec.Decode(r)
-	return rec, errors.Trace(err)
+type dummyRecordWriter struct {
+}
+
+func (w *dummyRecordWriter) Write(tp RecordType, id uint32, data []byte) error {
+	return nil
 }

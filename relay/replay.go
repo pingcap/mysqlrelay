@@ -14,10 +14,9 @@
 package relay
 
 import (
-	"bytes"
 	"io"
-	"io/ioutil"
 	"os"
+	"reflect"
 
 	"github.com/juju/errors"
 	"github.com/pingcap/tidb/terror"
@@ -27,12 +26,14 @@ import (
 type Replayer struct {
 	rec *os.File
 
-	recWriter io.Writer
+	recWriter recordWriter
 	clients   map[uint32]*ClientConn
 
 	OnRecordRead func(*Record)
 
 	driver IDriver
+
+	err error
 }
 
 func (r *Replayer) Run() error {
@@ -55,7 +56,8 @@ type replayChecker struct {
 }
 
 func (r *Replayer) readRecord() (*Record, error) {
-	record, err := ReadRecord(r.rec)
+	record := new(Record)
+	err := record.Decode(r.rec)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -64,21 +66,34 @@ func (r *Replayer) readRecord() (*Record, error) {
 	return record, nil
 }
 
-func (r *replayChecker) Write(data []byte) (int, error) {
-	record, err := r.r.readRecord()
+func (r *replayChecker) Write(tp RecordType, id uint32, data []byte) error {
+	if r.r.err != nil {
+		return nil
+	}
+
+	if tp != ConnResponseRecord {
+		r.r.err = errors.Errorf("next record must be response type, but %s", tp)
+		return nil
+	}
+
+	rec1, err := r.r.readRecord()
 	if err != nil {
-		return 0, errors.Trace(err)
+		r.r.err = errors.Trace(err)
+		return nil
 	}
 
-	if record.Type != ConnResponseRecord {
-		return 0, errors.Errorf("next record must be response type, but %s", record.Type)
+	rec2 := &Record{
+		Type:         tp,
+		ConnectionID: id,
+		Data:         data,
 	}
 
-	if !bytes.Equal(data, record.Data) {
-		return 0, errors.Errorf("mismatch record data, need %q, but got %q", record.Data, data)
+	if !reflect.DeepEqual(rec1, rec2) {
+		r.r.err = errors.Errorf("mismatch record got %s, but record %s", rec2, rec1)
+		return nil
 	}
 
-	return len(data), nil
+	return nil
 }
 
 func (r *Replayer) replayRecord() error {
@@ -117,19 +132,18 @@ func (r *Replayer) replayRecord() error {
 		if !ok {
 			return errors.Errorf("missing connection for %s", record)
 		}
-		err = conn.Dispatch(record.Data)
-		return errors.Trace(err)
+
+		conn.HandleRequest(record.Data)
 	case ConnResponseRecord:
 		_, ok := r.clients[record.ConnectionID]
 		if !ok {
 			return errors.Errorf("missing connection for %s", record)
 		}
-		// nothing to do.
 	default:
 		return errors.Errorf("invalid record %s", record)
 	}
 
-	return nil
+	return r.err
 }
 
 func NewReplayer(driver IDriver, path string, check bool) (*Replayer, error) {
@@ -144,12 +158,12 @@ func NewReplayer(driver IDriver, path string, check bool) (*Replayer, error) {
 	}
 
 	if !check {
-		r.recWriter = ioutil.Discard
+		r.recWriter = &dummyRecordWriter{}
 	} else {
 		r.recWriter = &replayChecker{r: r}
 	}
 
-	r.OnRecordRead = func(*Record) {}
+	r.OnRecordRead = func(rec *Record) {}
 
 	return r, nil
 }

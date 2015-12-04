@@ -27,14 +27,17 @@ type testRecordSuite struct {
 func (s *testRecordSuite) TestRecord(c *C) {
 	var buf bytes.Buffer
 
-	err := WriteRecord(&buf, ConnRequestRecord, 0, []byte("hello world"))
-	c.Assert(err, IsNil)
-
-	rec, err := ReadRecord(&buf)
-	c.Assert(err, IsNil)
-	c.Assert(rec, DeepEquals, &Record{
+	rec1 := &Record{
 		Type:         ConnRequestRecord,
 		ConnectionID: 0,
 		Data:         []byte("hello world"),
-	})
+	}
+
+	err := rec1.Encode(&buf)
+	c.Assert(err, IsNil)
+
+	rec2 := new(Record)
+	err = rec2.Decode(&buf)
+	c.Assert(err, IsNil)
+	c.Assert(rec1, DeepEquals, rec2)
 }

@@ -29,7 +29,6 @@
 package relay
 
 import (
-	"io/ioutil"
 	"net"
 	"os"
 	"sync"
@@ -47,14 +46,14 @@ var (
 
 // Server is the MySQL protocol server
 type Server struct {
-	driver            IDriver
-	listener          net.Listener
-	rwlock            *sync.RWMutex
-	concurrentLimiter *TokenLimiter
-	clients           map[uint32]net.Conn
-	wg                sync.WaitGroup
+	driver   IDriver
+	listener net.Listener
+	rwlock   *sync.RWMutex
+	clients  map[uint32]net.Conn
+	wg       sync.WaitGroup
 
-	rec *os.File
+	recLock *sync.Mutex
+	rec     *os.File
 }
 
 // use a const salt for handshake
@@ -70,7 +69,7 @@ func (s *Server) newConn(conn net.Conn) (cc *ClientConn, err error) {
 		Charset:      mysql.DefaultCharset,
 		alloc:        arena.NewAllocator(32 * 1024),
 		Addr:         addr,
-		recWriter:    ioutil.Discard,
+		recWriter:    &dummyRecordWriter{},
 	}
 	return
 }
@@ -78,16 +77,16 @@ func (s *Server) newConn(conn net.Conn) (cc *ClientConn, err error) {
 // NewServer creates a new Server.
 func NewServer(driver IDriver, addr string, path string) (*Server, error) {
 	s := &Server{
-		driver:            driver,
-		concurrentLimiter: NewTokenLimiter(1),
-		rwlock:            &sync.RWMutex{},
-		clients:           make(map[uint32]net.Conn),
+		driver:  driver,
+		rwlock:  &sync.RWMutex{},
+		clients: make(map[uint32]net.Conn),
+		recLock: &sync.Mutex{},
 	}
 
 	var err error
 
 	if len(path) > 0 {
-		s.rec, err = os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0755)
+		s.rec, err = os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0644)
 	} else {
 		// if empty, we will use DevNull file.
 		s.rec, err = os.Open(os.DevNull)
@@ -165,14 +164,18 @@ func (s *Server) onConn(c net.Conn) {
 		return
 	}
 
-	err = WriteRecord(s.rec, ConnCreateRecord, conn.ConnectionID, buf)
+	recWriter := &defaultRecordWriter{w: s.rec}
+
+	s.recLock.Lock()
+	err = recWriter.Write(ConnCreateRecord, conn.ConnectionID, buf)
+	s.recLock.Unlock()
 	if err != nil {
 		log.Errorf("record create conneciont %s err %s", conn, err)
 		return
 	}
 
 	// after handshake, we will record every request/response
-	conn.recWriter = s.rec
+	conn.recWriter = recWriter
 
 	s.rwlock.Lock()
 	s.clients[conn.ConnectionID] = c
@@ -185,8 +188,10 @@ func (s *Server) onConn(c net.Conn) {
 		delete(s.clients, conn.ConnectionID)
 		s.rwlock.Unlock()
 
-		WriteRecord(s.rec, ConnDeleteRecord, conn.ConnectionID, nil)
+		s.recLock.Lock()
+		recWriter.Write(ConnDeleteRecord, conn.ConnectionID, []byte{})
+		s.recLock.Unlock()
 	}()
 
-	conn.Run(s.concurrentLimiter)
+	conn.Run(s.recLock)
 }

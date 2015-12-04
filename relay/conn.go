@@ -43,6 +43,7 @@ import (
 	"net"
 	"runtime"
 	"strings"
+	"sync"
 
 	"github.com/juju/errors"
 	"github.com/ngaut/log"
@@ -69,13 +70,11 @@ type ClientConn struct {
 	lastCmd      string
 	ctx          IContext
 
-	recWriter io.Writer
+	recWriter recordWriter
 }
 
 func (cc *ClientConn) String() string {
-	return fmt.Sprintf("conn: %s, status: %d, charset: %s, user: %s, lastInsertId: %d",
-		cc.Addr, cc.ctx.Status(), cc.Charset, cc.User, cc.ctx.LastInsertID(),
-	)
+	return cc.Addr
 }
 
 func (cc *ClientConn) Handshake(driver IDriver) error {
@@ -158,17 +157,11 @@ func (cc *ClientConn) writeInitialHandshake() error {
 
 func (cc *ClientConn) readPacket() ([]byte, error) {
 	data, err := cc.pkg.Read()
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-
-	err = WriteRecord(cc.recWriter, ConnRequestRecord, cc.ConnectionID, data)
-
 	return data, errors.Trace(err)
 }
 
 func (cc *ClientConn) writePacket(data []byte) error {
-	err := WriteRecord(cc.recWriter, ConnResponseRecord, cc.ConnectionID, data)
+	err := cc.recWriter.Write(ConnResponseRecord, cc.ConnectionID, data[4:])
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -226,7 +219,7 @@ func (cc *ClientConn) readHandshakeResponse(driver IDriver) error {
 	return nil
 }
 
-func (cc *ClientConn) Run(l *TokenLimiter) {
+func (cc *ClientConn) Run(m *sync.Mutex) {
 	defer func() {
 		r := recover()
 		if r != nil {
@@ -239,18 +232,14 @@ func (cc *ClientConn) Run(l *TokenLimiter) {
 	}()
 
 	for {
-		err := cc.runPacket(l)
+		err := cc.runPacket(m)
 		if err != nil {
 			return
 		}
 	}
 }
 
-func (cc *ClientConn) runPacket(l *TokenLimiter) error {
-	tk := l.Get()
-	defer l.Put(tk)
-
-	cc.alloc.Reset()
+func (cc *ClientConn) runPacket(m *sync.Mutex) error {
 	data, err := cc.readPacket()
 	if err != nil {
 		if terror.ErrorNotEqual(err, io.EOF) {
@@ -259,7 +248,19 @@ func (cc *ClientConn) runPacket(l *TokenLimiter) error {
 		return errors.Trace(err)
 	}
 
-	if err := cc.Dispatch(data); err != nil {
+	m.Lock()
+	defer m.Unlock()
+
+	err = cc.recWriter.Write(ConnRequestRecord, cc.ConnectionID, data)
+	if err != nil {
+		return errors.Trace(err)
+	}
+
+	return errors.Trace(cc.HandleRequest(data))
+}
+
+func (cc *ClientConn) HandleRequest(data []byte) error {
+	if err := cc.dispatch(data); err != nil {
 		if terror.ErrorEqual(err, io.EOF) {
 			return errors.Trace(err)
 		}
@@ -272,7 +273,9 @@ func (cc *ClientConn) runPacket(l *TokenLimiter) error {
 	return nil
 }
 
-func (cc *ClientConn) Dispatch(data []byte) error {
+func (cc *ClientConn) dispatch(data []byte) error {
+	cc.alloc.Reset()
+
 	cmd := data[0]
 	data = data[1:]
 	cc.lastCmd = hack.String(data)

@@ -29,7 +29,7 @@ import (
 var (
 	store     = flag.String("store", "memory", "registered store name, [memory, goleveldb, boltdb]")
 	storePath = flag.String("path", "/tmp/tidb", "tidb storage path")
-	logLevel  = flag.String("L", "debug", "log level: info, debug, warn, error, fatal")
+	logLevel  = flag.String("L", "error", "log level: info, debug, warn, error, fatal")
 	port      = flag.String("P", "4000", "mp server port")
 	lease     = flag.Int("lease", 1, "schema lease seconds, very dangerous to change only if you know what you do")
 	relayPath = flag.String("relay_path", "/tmp/tidb_relay.log", "log file to record commands")
@@ -69,6 +69,7 @@ func main() {
 		sig := <-sc
 		log.Infof("Got signal [%d] to exit.", sig)
 		svr.Close()
+		time.Sleep(1 * time.Second)
 		os.Exit(0)
 	}()
 
